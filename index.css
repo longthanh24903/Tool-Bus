@@ -18,7 +18,7 @@
 
   .ant-input:hover:not(:disabled),
   .custom-input:hover:not(:disabled) {
-    border-color: #9B7BF5 !important;
+    border-color: #9b7bf5 !important;
   }
 
   /* Button hover effects */
@@ -44,7 +44,7 @@
   }
 
   .ant-switch:not(.ant-switch-checked) {
-    background-color: #E3E3E8 !important;
+    background-color: #e3e3e8 !important;
   }
 
   /* Card hover effects */
@@ -61,7 +61,7 @@
   /* Placeholder color */
   .ant-input::placeholder,
   .ant-input-placeholder {
-    color: #7E7E85 !important;
+    color: #7e7e85 !important;
   }
 
   /* Line height for better readability */
@@ -75,4 +75,24 @@
       grid-template-columns: 1fr !important;
     }
   }
+}
+
+/* Scrollbar tinh gọn, tone tím gradient + border sáng */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #7951d4, #9c7bff);
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #6e46c9, #a28eff);
+  border-color: rgba(255, 255, 255, 0.35);
 }

@@ -181,7 +181,7 @@ export const Controls: React.FC<ControlsProps> = ({
                 value={numParts}
                 onChange={setNumParts}
                 disabled={isLoading || isGenerationStarted}
-                className="w-full"
+                className="w-full h-10"
                 options={PART_OPTIONS.map((part) => ({
                   label: `${part} Phần`,
                   value: part,
@@ -217,7 +217,7 @@ export const Controls: React.FC<ControlsProps> = ({
             value={language}
             onChange={setLanguage}
             disabled={isLoading || isGenerationStarted}
-            className="w-full"
+            className="w-full h-11 rounded"
             options={LANGUAGE_OPTIONS.map((opt) => ({
               label: opt.label,
               value: opt.value,
@@ -297,7 +297,7 @@ export const Controls: React.FC<ControlsProps> = ({
             onClick={onOpenHistoryModal}
             disabled={isLoading || isGenerationStarted}
             block
-            className={`h-11 rounded-xl border ${
+            className={`h-11 rounded-md border ${
               previousTopics.length > 0
                 ? "bg-[#E8E1FB] border-[#A68AF0] text-[#7951d4]"
                 : "bg-[#F5F5F7] border-[#E2E0EB] text-[#6b6b6b]"
@@ -315,7 +315,7 @@ export const Controls: React.FC<ControlsProps> = ({
         <Divider className="my-2" />
 
         {/* Action Buttons */}
-        <Space direction="vertical" size="middle" className="w-ful">
+        <Space direction="vertical" size="middle" className="w-full">
           <Button
             type="primary"
             icon={<ThunderboltOutlined />}
@@ -324,7 +324,7 @@ export const Controls: React.FC<ControlsProps> = ({
             loading={isLoading}
             block
             size="large"
-            className="h-11 rounded-xl font-semibold text-[16px] border-0
+            className="h-11 rounded-md font-semibold text-[16px] border-0 w-full
                      bg-gradient-to-r from-[#7951d4] to-[#9c7bff]
                      shadow-[0_4px_10px_rgba(121,81,212,0.25)]
                      hover:brightness-110"
@@ -338,7 +338,7 @@ export const Controls: React.FC<ControlsProps> = ({
               onClick={onReset}
               disabled={isLoading || isSuggestingTopic}
               block
-              className="h-11 rounded-xl"
+              className="h-11 rounded-md"
             >
               Thiết lập lại &amp; Bắt đầu lại
             </Button>
