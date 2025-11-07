@@ -1,0 +1,78 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom styles for improved UX */
+@layer utilities {
+  /* Input focus states */
+  .ant-input:focus,
+  .ant-input-focused,
+  .custom-input:focus,
+  .ant-select-selector:focus,
+  .ant-select-focused .ant-select-selector {
+    border-color: #7951d4 !important;
+    border-width: 1.5px !important;
+    box-shadow: 0 0 0 3px rgba(121, 81, 212, 0.1) !important;
+    transition: all 0.2s ease-in-out;
+  }
+
+  .ant-input:hover:not(:disabled),
+  .custom-input:hover:not(:disabled) {
+    border-color: #9B7BF5 !important;
+  }
+
+  /* Button hover effects */
+  .ant-btn-primary:hover:not(.ant-btn-loading):not(.ant-btn-disabled) {
+    box-shadow: 0 6px 16px rgba(121, 81, 212, 0.35) !important;
+    transform: translateY(-2px);
+    transition: all 0.2s ease-in-out;
+    background: linear-gradient(90deg, #8b5cf6, #a78bfa) !important;
+  }
+
+  /* Main action button special styling */
+  .main-action-button:hover:not(.ant-btn-loading):not(.ant-btn-disabled) {
+    box-shadow: 0 6px 16px rgba(121, 81, 212, 0.35) !important;
+  }
+
+  /* Switch animations */
+  .ant-switch {
+    transition: all 0.2s ease-in-out !important;
+  }
+
+  .ant-switch:hover:not(.ant-switch-disabled) {
+    box-shadow: 0 0 0 4px rgba(121, 81, 212, 0.1);
+  }
+
+  .ant-switch:not(.ant-switch-checked) {
+    background-color: #E3E3E8 !important;
+  }
+
+  /* Card hover effects */
+  .ant-card:hover {
+    box-shadow: 0 1px 6px rgba(0, 0, 0, 0.06) !important;
+    transition: box-shadow 0.2s ease-in-out;
+  }
+
+  /* Smooth transitions */
+  * {
+    transition: border-color 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
+  }
+
+  /* Placeholder color */
+  .ant-input::placeholder,
+  .ant-input-placeholder {
+    color: #7E7E85 !important;
+  }
+
+  /* Line height for better readability */
+  body {
+    line-height: 1.6;
+  }
+
+  /* Responsive grid */
+  @media (max-width: 1024px) {
+    .grid {
+      grid-template-columns: 1fr !important;
+    }
+  }
+}
