@@ -20,35 +20,144 @@ function extractJsonFromText(text: string): string {
 function isQuotaError(error: any): boolean {
     if (!error) return false;
     
-    const errorMessage = error.message?.toLowerCase() || '';
-    const errorCode = error.code || error.status || '';
-    const errorString = String(error).toLowerCase();
-    
-    // Các pattern phổ biến cho lỗi quota/pro
-    const quotaPatterns = [
-        'quota',
-        'rate limit',
-        'resource exhausted',
-        '429',
-        'insufficient quota',
-        'billing',
-        'payment required',
-        '403',
-        'permission denied',
-        'api key not valid',
-        'invalid api key',
-        'api key expired',
-        'quota exceeded',
-        'quota limit',
-        'usage limit',
-        'limit exceeded'
-    ];
-    
-    return quotaPatterns.some(pattern => 
-        errorMessage.includes(pattern) || 
-        errorString.includes(pattern) ||
-        String(errorCode).includes(pattern)
-    );
+    try {
+        // Kiểm tra nested error structure (GoogleGenAI SDK có thể trả về error.error)
+        const errorObj = error.error || error;
+        const errorResponse = errorObj.response || error.response || errorObj;
+        
+        // Lấy các giá trị từ nhiều level (kiểm tra cả nested structure)
+        const errorMessage = (
+            errorResponse?.error?.message || 
+            errorObj?.message || 
+            error?.message || 
+            errorResponse?.message || 
+            ''
+        ).toLowerCase();
+        
+        const errorCode = (
+            errorResponse?.error?.code || 
+            errorObj?.code || 
+            error?.code || 
+            errorResponse?.code ||
+            errorObj?.statusCode ||
+            error?.statusCode ||
+            ''
+        );
+        
+        const errorStatus = (
+            errorResponse?.error?.status || 
+            errorObj?.status || 
+            error?.status || 
+            errorResponse?.status || 
+            ''
+        ).toLowerCase();
+        
+        // Serialize to string để check patterns
+        const errorString = JSON.stringify(error).toLowerCase();
+        
+        // Log error để debug
+        console.log('[Quota Error Check]', {
+            code: errorCode,
+            status: errorStatus,
+            message: errorMessage.substring(0, 100),
+            hasErrorNested: !!error.error,
+            hasResponseError: !!errorResponse?.error,
+            errorStructure: {
+                error: !!error.error,
+                errorError: !!error.error?.error,
+                errorResponse: !!error.response,
+            }
+        });
+        
+        // Kiểm tra error code trực tiếp (429, 403) - kiểm tra cả number và string
+        // Kiểm tra nhiều cách khác nhau vì error structure có thể khác nhau
+        // Đặc biệt kiểm tra error.error.code và error.error.status (cấu trúc từ API response)
+        const code429 = (
+            errorCode === 429 || 
+            errorCode === '429' || 
+            String(errorCode) === '429' ||
+            String(errorCode).includes('429') ||
+            errorResponse?.error?.code === 429 ||
+            errorObj?.code === 429 ||
+            error?.code === 429 ||
+            error?.error?.code === 429 ||
+            errorObj?.error?.code === 429 ||
+            // Kiểm tra trong errorString (JSON serialized)
+            errorString.includes('"code":429') ||
+            errorString.includes('"code": 429')
+        );
+        
+        const statusExhausted = (
+            errorStatus === 'resource_exhausted' ||
+            errorStatus === 'RESOURCE_EXHAUSTED' ||
+            errorStatus.includes('resource_exhausted') ||
+            errorResponse?.error?.status === 'RESOURCE_EXHAUSTED' ||
+            errorObj?.status === 'RESOURCE_EXHAUSTED' ||
+            error?.status === 'RESOURCE_EXHAUSTED' ||
+            error?.error?.status === 'RESOURCE_EXHAUSTED' ||
+            errorObj?.error?.status === 'RESOURCE_EXHAUSTED' ||
+            // Kiểm tra trong errorString
+            errorString.includes('resource_exhausted') ||
+            errorString.includes('RESOURCE_EXHAUSTED')
+        );
+        
+        if (code429 || statusExhausted) {
+            console.log('[Quota Error Check] ✅ Detected quota error by code/status:', { 
+                code: errorCode, 
+                status: errorStatus,
+                code429,
+                statusExhausted,
+                errorObjCode: errorObj?.code,
+                errorResponseCode: errorResponse?.error?.code,
+                errorErrorCode: error?.error?.code,
+            });
+            return true;
+        }
+        
+        // Các pattern phổ biến cho lỗi quota/pro
+        const quotaPatterns = [
+            'quota',
+            'rate limit',
+            'resource exhausted',
+            '429',
+            'insufficient quota',
+            'billing',
+            'payment required',
+            '403',
+            'permission denied',
+            'api key not valid',
+            'invalid api key',
+            'api key expired',
+            'quota exceeded',
+            'quota limit',
+            'usage limit',
+            'limit exceeded',
+            'exceeded your current quota',
+            'free_tier_requests',
+            'generativelanguage.googleapis.com',
+            'resource_exhausted',
+            'RESOURCE_EXHAUSTED'
+        ];
+        
+        const isQuota = quotaPatterns.some(pattern => 
+            errorMessage.includes(pattern) || 
+            errorString.includes(pattern) ||
+            String(errorCode).includes(pattern) ||
+            errorStatus.includes(pattern)
+        );
+        
+        if (isQuota) {
+            console.log('[Quota Error Check] ✅ Detected quota error by pattern matching');
+        } else {
+            console.log('[Quota Error Check] ❌ Not a quota error');
+        }
+        
+        return isQuota;
+    } catch (e) {
+        console.error('[Quota Error Check] Error checking quota error:', e);
+        // Nếu có lỗi khi check, return false để không block
+        return false;
+    }
 }
 
 /**
@@ -70,12 +179,42 @@ function createAiInstance(): GoogleGenAI {
  * Tự động xoay API key khi gặp lỗi quota/pro.
  */
 async function generateWithFallback(params: Omit<GenerateContentParameters, 'model'>): Promise<GenerateContentResponse> {
-    const maxRetries = 3; // Số lần thử tối đa với các API keys khác nhau
+    // Lấy số lượng keys available để set maxRetries
+    const allKeys = apiKeyManager.getAllKeys();
+    const availableKeysCount = allKeys.filter(k => !k.isExhausted).length;
+    const maxRetries = Math.max(availableKeysCount, allKeys.length, 3); // Đảm bảo ít nhất thử 3 lần
     let lastError: any = null;
+    const usedKeys = new Set<string>(); // Track các keys đã thử trong request này
+    
+    console.log(`[API Key Rotation] Starting with ${availableKeysCount} available keys out of ${allKeys.length} total keys`);
     
     for (let attempt = 0; attempt < maxRetries; attempt++) {
         try {
-            const ai = createAiInstance();
+            // Lấy API key hiện tại (sẽ tự động skip các key đã exhausted)
+            const currentApiKey = apiKeyManager.getCurrentKey();
+            
+            if (!currentApiKey) {
+                throw new Error('Không có API key nào khả dụng. Vui lòng thêm API key mới.');
+            }
+            
+            // Nếu key này đã được thử trong request này, mark exhausted và rotate
+            if (usedKeys.has(currentApiKey)) {
+                console.warn(`[API Key Rotation] Key already tried in this request: ${currentApiKey.substring(0, 10)}...`);
+                apiKeyManager.markCurrentKeyExhausted('Key already tried in this request');
+                
+                // Thử lấy key mới
+                const nextKey = apiKeyManager.getCurrentKey();
+                if (!nextKey || usedKeys.has(nextKey)) {
+                    // Không còn key nào khả dụng
+                    throw new Error('Đã thử tất cả các API keys. Không còn key nào khả dụng.');
+                }
+                continue; // Continue với key mới
+            }
+            
+            usedKeys.add(currentApiKey);
+            console.log(`[API Key Rotation] Attempt ${attempt + 1}/${maxRetries}, using key: ${currentApiKey.substring(0, 10)}...`);
+            
+            const ai = new GoogleGenAI({ apiKey: currentApiKey });
             
             // Thử với primary model trước
             try {
@@ -83,69 +222,180 @@ async function generateWithFallback(params: Omit<GenerateContentParameters, 'mod
                     ...params,
                     model: primaryModel,
                 });
+                console.log(`[API Key Rotation] Success with key: ${currentApiKey.substring(0, 10)}...`);
                 return response;
             } catch (primaryError: any) {
+                // Log error đầy đủ để debug - log toàn bộ error object
+                console.error(`[API Key Rotation] Primary model error - FULL ERROR OBJECT:`, primaryError);
+                console.error(`[API Key Rotation] Primary model error - STRUCTURE:`, {
+                    message: primaryError?.message,
+                    code: primaryError?.code,
+                    status: primaryError?.status,
+                    error: primaryError?.error,
+                    errorCode: primaryError?.error?.code,
+                    errorStatus: primaryError?.error?.status,
+                    errorMessage: primaryError?.error?.message,
+                    response: primaryError?.response,
+                    statusCode: primaryError?.statusCode,
+                    // Log cả JSON string để xem cấu trúc
+                    errorString: JSON.stringify(primaryError).substring(0, 500),
+                });
+                
+                // Kiểm tra xem có phải lỗi quota không - GỌI TRƯỚC KHI XỬ LÝ
+                let isQuota = isQuotaError(primaryError);
+                console.log(`[API Key Rotation] ⚠️ Is quota error (first check): ${isQuota}`);
+                
+                // Nếu không phát hiện được, thử parse error string và kiểm tra lại
+                // Đây là fallback để đảm bảo không bỏ sót lỗi quota
+                if (!isQuota) {
+                    try {
+                        const errorStr = JSON.stringify(primaryError).toLowerCase();
+                        // Kiểm tra các pattern trong error string
+                        if (
+                            errorStr.includes('429') || 
+                            errorStr.includes('resource_exhausted') || 
+                            errorStr.includes('quota exceeded') ||
+                            errorStr.includes('exceeded your current quota') ||
+                            errorStr.includes('free_tier_requests') ||
+                            errorStr.includes('generativelanguage.googleapis.com')
+                        ) {
+                            console.warn(`[API Key Rotation] ⚠️ Detected quota error in error string, forcing isQuota = true`);
+                            isQuota = true; // Force là quota error
+                        }
+                    } catch (e) {
+                        console.error('[API Key Rotation] Error parsing error string:', e);
+                    }
+                }
+                
+                console.log(`[API Key Rotation] ⚠️ Final isQuota check: ${isQuota}`);
+                
                 // Nếu lỗi là quota error, đánh dấu key hiện tại và thử key khác
-                if (isQuotaError(primaryError)) {
-                    console.warn(`API key hiện tại hết quota/pro. Đang thử API key khác...`, primaryError);
-                    apiKeyManager.markCurrentKeyExhausted(primaryError.message || 'Quota exhausted');
+                if (isQuota) {
+                    const errorMsg = primaryError.message || primaryError.error?.message || primaryError.error?.error?.message || 'Quota exhausted';
+                    console.warn(`[API Key Rotation] ⚠️ Key exhausted: ${currentApiKey.substring(0, 10)}..., error: ${errorMsg.substring(0, 100)}`);
+                    console.warn(`[API Key Rotation] Marking key as exhausted and rotating...`);
+                    
+                    // Đánh dấu key hiện tại là exhausted (truyền key cụ thể để đảm bảo mark đúng)
+                    apiKeyManager.markKeyExhausted(currentApiKey, errorMsg);
+                    
+                    // Đợi một chút trước khi rotate (để đảm bảo state được update)
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    
+                    // Kiểm tra xem còn key nào available không
+                    const hasAvailable = apiKeyManager.hasAvailableKey();
+                    const allKeys = apiKeyManager.getAllKeys();
+                    const availableKeys = allKeys.filter(k => !k.isExhausted);
+                    console.log(`[API Key Rotation] Has available keys: ${hasAvailable}, available count: ${availableKeys.length}/${allKeys.length}`);
                     
                     // Nếu còn key khác, thử lại
-                    if (apiKeyManager.hasAvailableKey() && attempt < maxRetries - 1) {
-                        continue;
+                    if (hasAvailable && attempt < maxRetries - 1) {
+                        console.log(`[API Key Rotation] ✅ Rotating to next key (attempt ${attempt + 1}/${maxRetries})...`);
+                        // Reset usedKeys để cho phép thử key mới
+                        usedKeys.clear();
+                        continue; // Continue loop để thử key tiếp theo
                     }
                     
-                    // Nếu tất cả keys đã exhausted, chuyển sang flash model
-                    console.warn(`Tất cả API keys đã hết quota/pro. Chuyển sang model Flash.`);
+                    // Nếu tất cả keys đã exhausted, chuyển sang flash model với key cuối cùng
+                    console.warn(`[API Key Rotation] ⚠️ All keys exhausted. Trying Flash model with last key.`);
+                    try {
+                        const lastKey = apiKeyManager.getCurrentKey();
+                        if (lastKey) {
+                            console.log(`[API Key Rotation] Trying Flash model with key: ${lastKey.substring(0, 10)}...`);
+                            const flashAi = new GoogleGenAI({ apiKey: lastKey });
+                            const response = await flashAi.models.generateContent({
+                                ...params,
+                                model: fallbackModel,
+                            });
+                            console.log(`[API Key Rotation] ✅ Flash model succeeded`);
+                            return response;
+                        }
+                    } catch (flashError: any) {
+                        console.error(`[API Key Rotation] ❌ Flash model also failed:`, flashError);
+                        throw new Error(`Tất cả API keys đã hết quota và không thể sử dụng Flash model: ${flashError.message}`);
+                    }
+                }
+                
+                // Nếu không phải lỗi quota, thử fallback model với key hiện tại
+                console.warn(
+                    `Primary model '${primaryModel}' failed. Retrying with fallback '${fallbackModel}'.`,
+                    primaryError
+                );
+                try {
                     const response = await ai.models.generateContent({
                         ...params,
                         model: fallbackModel,
                     });
                     return response;
+                } catch (fallbackError: any) {
+                    console.error(`[API Key Rotation] Fallback model error:`, fallbackError);
+                    
+                    // Nếu fallback model cũng lỗi và là quota error, đánh dấu key
+                    if (isQuotaError(fallbackError)) {
+                        const errorMsg = fallbackError.message || fallbackError.error?.message || fallbackError.error?.error?.message || 'Quota exhausted';
+                        console.warn(`[API Key Rotation] ⚠️ Fallback model also exhausted key: ${currentApiKey.substring(0, 10)}...`);
+                        apiKeyManager.markKeyExhausted(currentApiKey, errorMsg);
+                        
+                        // Đợi một chút trước khi rotate
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                        
+                        if (apiKeyManager.hasAvailableKey() && attempt < maxRetries - 1) {
+                            console.log(`[API Key Rotation] ✅ Rotating to next key after fallback error...`);
+                            // Reset usedKeys để cho phép thử key mới
+                            usedKeys.clear();
+                            continue;
+                        }
+                    }
+                    // Nếu không phải quota error hoặc không còn key, throw error
+                    throw fallbackError;
                 }
-                
-                // Nếu không phải lỗi quota, thử fallback model
-                console.warn(
-                    `Primary model '${primaryModel}' failed. Retrying with fallback '${fallbackModel}'.`,
-                    primaryError
-                );
-                const response = await ai.models.generateContent({
-                    ...params,
-                    model: fallbackModel,
-                });
-                return response;
             }
         } catch (error: any) {
             lastError = error;
+            console.error(`[API Key Rotation] Outer catch error:`, error);
+            
+            // Kiểm tra xem có phải lỗi quota không
+            const isQuota = isQuotaError(error);
+            console.log(`[API Key Rotation] Outer catch - Is quota error: ${isQuota}`);
             
             // Nếu lỗi là quota error, đánh dấu và thử key khác
-            if (isQuotaError(error)) {
-                console.warn(`API key hiện tại hết quota/pro. Đang thử API key khác...`, error);
-                apiKeyManager.markCurrentKeyExhausted(error.message || 'Quota exhausted');
+            if (isQuota) {
+                // Tìm key đã được thử (key cuối cùng trong usedKeys)
+                const triedKey = usedKeys.size > 0 ? Array.from(usedKeys)[usedKeys.size - 1] : null;
+                const currentKey = triedKey || apiKeyManager.getCurrentKey();
+                
+                if (currentKey) {
+                    const errorMsg = error.message || error.error?.message || error.error?.error?.message || 'Quota exhausted';
+                    console.warn(`[API Key Rotation] ⚠️ Key exhausted in outer catch: ${currentKey.substring(0, 10)}..., error: ${errorMsg.substring(0, 100)}`);
+                    apiKeyManager.markKeyExhausted(currentKey, errorMsg);
+                }
+                
+                // Đợi một chút trước khi rotate
+                await new Promise(resolve => setTimeout(resolve, 100));
+                
+                // Kiểm tra xem còn key nào available không
+                const hasAvailable = apiKeyManager.hasAvailableKey();
+                const allKeys = apiKeyManager.getAllKeys();
+                const availableKeys = allKeys.filter(k => !k.isExhausted);
+                console.log(`[API Key Rotation] Has available keys after error: ${hasAvailable}, available count: ${availableKeys.length}/${allKeys.length}`);
                 
                 // Nếu còn key khác, thử lại
-                if (apiKeyManager.hasAvailableKey() && attempt < maxRetries - 1) {
+                if (hasAvailable && attempt < maxRetries - 1) {
+                    console.log(`[API Key Rotation] ✅ Rotating to next key (attempt ${attempt + 1}/${maxRetries})...`);
+                    // Reset usedKeys để cho phép thử key mới
+                    usedKeys.clear();
                     continue;
                 }
                 
-                // Nếu tất cả keys đã exhausted, chuyển sang flash model với key cuối cùng
+                // Nếu tất cả keys đã exhausted, throw error
                 if (apiKeyManager.areAllKeysExhausted()) {
-                    console.warn(`Tất cả API keys đã hết quota/pro. Chuyển sang model Flash.`);
-                    try {
-                        const ai = createAiInstance();
-                        const response = await ai.models.generateContent({
-                            ...params,
-                            model: fallbackModel,
-                        });
-                        return response;
-                    } catch (flashError: any) {
-                        throw new Error(`Tất cả API keys đã hết quota và không thể sử dụng Flash model: ${flashError.message}`);
-                    }
+                    console.error(`[API Key Rotation] ❌ All keys exhausted. Cannot continue.`);
+                    throw new Error(`Tất cả API keys đã hết quota/pro. Vui lòng thêm API key mới hoặc đợi quota reset.`);
                 }
             }
             
             // Nếu không phải lỗi quota hoặc đã hết lần thử, throw error
             if (attempt === maxRetries - 1) {
+                console.error(`[API Key Rotation] ❌ Max retries reached. Throwing error.`);
                 throw error;
             }
         }

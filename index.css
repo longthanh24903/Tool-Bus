@@ -77,6 +77,11 @@
   }
 }
 
+.ant-tooltip-inner {
+  color: #fff !important;
+  background-color: #7951d4 !important;
+}
+
 /* Scrollbar tinh gọn, tone tím gradient + border sáng */
 ::-webkit-scrollbar {
   width: 8px;

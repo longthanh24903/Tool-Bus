@@ -16,7 +16,7 @@ import {
   HistoryOutlined,
 } from "@ant-design/icons";
 import { LANGUAGE_OPTIONS, PART_OPTIONS } from "../constants";
-import type { Language } from "../types";
+import type { Language, AutoWriteConfig } from "../types";
 
 const { TextArea } = Input;
 
@@ -51,6 +51,16 @@ interface ControlsProps {
   previousTopics: string[];
   onClearHistory: () => void;
   onOpenHistoryModal: () => void;
+  autoWriteConfig?: AutoWriteConfig;
+  isAutoWriting?: boolean;
+  isAutoLooping?: boolean;
+  onStopAutoLoop?: () => void;
+  autoWriteProgress?: {
+    current: number;
+    total: number;
+    status: string;
+    storyNumber?: number;
+  };
 }
 
 export const Controls: React.FC<ControlsProps> = ({
@@ -84,10 +94,21 @@ export const Controls: React.FC<ControlsProps> = ({
   previousTopics,
   onClearHistory,
   onOpenHistoryModal,
+  autoWriteConfig,
+  isAutoWriting,
+  isAutoLooping,
+  onStopAutoLoop,
+  autoWriteProgress,
 }) => {
   const isGenerationStarted = currentPart > 0;
 
   const buttonText = useMemo(() => {
+    if (isAutoWriting) {
+      if (autoWriteProgress && autoWriteProgress.total > 0) {
+        return `Auto Write: ${autoWriteProgress.current}/${autoWriteProgress.total}`;
+      }
+      return "Đang tự động viết...";
+    }
     if (isGenerating) {
       return `Đang tạo Phần ${currentPart + 1}...`;
     }
@@ -100,6 +121,9 @@ export const Controls: React.FC<ControlsProps> = ({
     if (isGenerationStarted) {
       return `Tạo Phần ${currentPart + 1} / ${totalParts}`;
     }
+    if (autoWriteConfig?.enabled) {
+      return "Bắt đầu Auto Write";
+    }
     return "Tạo truyện";
   }, [
     isGenerating,
@@ -108,6 +132,9 @@ export const Controls: React.FC<ControlsProps> = ({
     isGenerationStarted,
     currentPart,
     totalParts,
+    isAutoWriting,
+    autoWriteProgress,
+    autoWriteConfig?.enabled,
   ]);
 
   const handleButtonClick = () => {
@@ -284,11 +311,87 @@ export const Controls: React.FC<ControlsProps> = ({
               <Switch
                 checked={autoContinue}
                 onChange={setAutoContinue}
-                disabled={isLoading || isGenerationStarted}
+                disabled={isLoading || isGenerationStarted || isAutoWriting}
               />
             </div>
           </Space>
         </div>
+
+        {/* Auto Write Mode Indicator */}
+        {autoWriteConfig?.enabled && (
+          <div
+            style={{
+              padding: "12px",
+              backgroundColor: isAutoLooping ? "#FFF4E6" : "#E8E1FB",
+              borderRadius: 8,
+              border: `1px solid ${isAutoLooping ? "#FFA940" : "#A68AF0"}`,
+              marginTop: 16,
+            }}
+          >
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[14px] font-semibold text-[#7951d4] flex items-center gap-2">
+                <span>{isAutoLooping ? "🔄" : "🤖"}</span>
+                <span>
+                  {isAutoLooping ? "Auto Loop Mode" : "Auto Write Mode"}
+                </span>
+              </span>
+              {isAutoWriting && (
+                <span className="text-[12px] text-[#7951d4] animate-pulse">
+                  Đang chạy...
+                </span>
+              )}
+            </div>
+            {autoWriteConfig.autoLoop && (
+              <div className="text-[12px] text-[#6b6b6b] mb-1">
+                <div className="flex items-center justify-between mb-1">
+                  <span>• Tự động lặp lại</span>
+                  {isAutoLooping && autoWriteProgress?.storyNumber && (
+                    <span className="font-semibold text-[#FFA940]">
+                      Story #{autoWriteProgress.storyNumber}
+                      {autoWriteConfig.maxStories &&
+                      autoWriteConfig.maxStories > 0
+                        ? `/${autoWriteConfig.maxStories}`
+                        : ""}
+                    </span>
+                  )}
+                </div>
+                {autoWriteConfig.maxStories &&
+                autoWriteConfig.maxStories > 0 ? (
+                  <div className="text-[11px] text-[#8c8c8c]">
+                    Tối đa: {autoWriteConfig.maxStories} kịch bản
+                  </div>
+                ) : (
+                  <div className="text-[11px] text-[#8c8c8c]">
+                    Không giới hạn (vô hạn)
+                  </div>
+                )}
+              </div>
+            )}
+            {autoWriteConfig.autoSuggestTopic && (
+              <div className="text-[12px] text-[#6b6b6b] mb-1">
+                • Tự động gợi ý topic
+              </div>
+            )}
+            {autoWriteProgress && autoWriteProgress.total > 0 && (
+              <div className="text-[12px] text-[#6b6b6b] mb-2">
+                Tiến độ: {autoWriteProgress.current}/{autoWriteProgress.total}{" "}
+                parts
+              </div>
+            )}
+            {isAutoLooping && onStopAutoLoop && (
+              <Button
+                type="primary"
+                danger
+                size="small"
+                onClick={onStopAutoLoop}
+                block
+                className="mt-2"
+              >
+                ⏹ Dừng Auto Loop
+              </Button>
+            )}
+          </div>
+        )}
 
         {/* History Button */}
         <div>
@@ -320,7 +423,15 @@ export const Controls: React.FC<ControlsProps> = ({
             type="primary"
             icon={<ThunderboltOutlined />}
             onClick={handleButtonClick}
-            disabled={isLoading || (!isComplete && topic.trim() === "")}
+            disabled={
+              isLoading ||
+              (!isComplete &&
+                topic.trim() === "" &&
+                !(
+                  autoWriteConfig?.enabled &&
+                  (autoWriteConfig.autoSuggestTopic || autoWriteConfig.autoLoop)
+                ))
+            }
             loading={isLoading}
             block
             size="large"

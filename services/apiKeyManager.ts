@@ -104,7 +104,7 @@ class ApiKeyManager {
     }
 
     /**
-     * Lấy API key hiện tại (chưa exhausted)
+     * Lấy API key hiện tại (chưa exhausted) và tự động rotate sang key tiếp theo
      */
     getCurrentKey(): string | null {
         this.initialize();
@@ -114,36 +114,112 @@ class ApiKeyManager {
         }
 
         // Tìm key chưa exhausted, bắt đầu từ currentIndex
+        const startIndex = this.currentIndex;
         let attempts = 0;
+        
         while (attempts < this.keys.length) {
             const keyInfo = this.keys[this.currentIndex];
             if (!keyInfo.isExhausted) {
-                return keyInfo.key;
+                const selectedKey = keyInfo.key;
+                // Cập nhật lastUsed
+                keyInfo.lastUsed = Date.now();
+                this.save();
+                
+                // Tự động rotate sang key tiếp theo để load balancing
+                // (chỉ rotate nếu có nhiều hơn 1 key available)
+                const availableKeys = this.keys.filter(k => !k.isExhausted);
+                if (availableKeys.length > 1) {
+                    this.rotateToNextAvailableKey();
+                }
+                
+                return selectedKey;
             }
+            // Key đã exhausted, chuyển sang key tiếp theo
             this.currentIndex = (this.currentIndex + 1) % this.keys.length;
             attempts++;
+            
+            // Nếu đã quay lại vị trí bắt đầu, break
+            if (this.currentIndex === startIndex && attempts > 0) {
+                break;
+            }
         }
 
-        // Tất cả keys đã exhausted, trả về key đầu tiên (sẽ dùng flash model)
+        // Tất cả keys đã exhausted, trả về key đầu tiên để thử lại (có thể đã reset)
+        console.warn('[API Key Manager] All keys exhausted, returning first key as fallback');
         return this.keys[0]?.key || null;
     }
 
     /**
-     * Đánh dấu key hiện tại là exhausted (hết quota/pro)
+     * Đánh dấu một key cụ thể là exhausted (hết quota/pro)
+     * @param key - API key cần mark exhausted (nếu không có, mark key tại currentIndex)
      */
-    markCurrentKeyExhausted(error?: string): void {
+    markKeyExhausted(key?: string, error?: string): void {
         if (this.keys.length === 0) return;
 
-        const currentKeyInfo = this.keys[this.currentIndex];
-        if (currentKeyInfo) {
-            currentKeyInfo.isExhausted = true;
-            currentKeyInfo.lastError = error;
-            currentKeyInfo.lastUsed = Date.now();
-            this.save();
-
-            // Chuyển sang key tiếp theo
-            this.currentIndex = (this.currentIndex + 1) % this.keys.length;
+        let keyToMark: ApiKeyInfo | null = null;
+        
+        if (key) {
+            // Tìm key theo giá trị
+            keyToMark = this.keys.find(k => k.key === key) || null;
+        } else {
+            // Mark key tại currentIndex
+            keyToMark = this.keys[this.currentIndex] || null;
         }
+        
+        if (keyToMark && !keyToMark.isExhausted) {
+            keyToMark.isExhausted = true;
+            keyToMark.lastError = error;
+            keyToMark.lastUsed = Date.now();
+            this.save();
+            console.log(`[API Key Manager] ✅ Marked key as exhausted: ${keyToMark.key.substring(0, 10)}..., error: ${error?.substring(0, 50)}`);
+            
+            // Nếu key vừa mark là key tại currentIndex, rotate sang key khác
+            if (this.keys[this.currentIndex] === keyToMark) {
+                this.rotateToNextAvailableKey();
+            }
+        } else if (keyToMark && keyToMark.isExhausted) {
+            console.log(`[API Key Manager] Key already exhausted: ${keyToMark.key.substring(0, 10)}...`);
+        } else {
+            console.warn(`[API Key Manager] Key not found to mark as exhausted`);
+        }
+    }
+    
+    /**
+     * Đánh dấu key hiện tại là exhausted (hết quota/pro)
+     * @deprecated - Sử dụng markKeyExhausted() với key cụ thể
+     */
+    markCurrentKeyExhausted(error?: string): void {
+        this.markKeyExhausted(undefined, error);
+    }
+    
+    /**
+     * Chuyển sang key tiếp theo chưa exhausted
+     */
+    private rotateToNextAvailableKey(): void {
+        if (this.keys.length === 0) return;
+        
+        const startIndex = this.currentIndex;
+        let attempts = 0;
+        
+        // Tìm key tiếp theo chưa exhausted
+        while (attempts < this.keys.length) {
+            this.currentIndex = (this.currentIndex + 1) % this.keys.length;
+            const keyInfo = this.keys[this.currentIndex];
+            
+            if (!keyInfo.isExhausted) {
+                console.log(`[API Key Manager] ✅ Rotated to key: ${keyInfo.key.substring(0, 10)}...`);
+                return;
+            }
+            
+            attempts++;
+            
+            // Nếu đã quay lại vị trí bắt đầu, break
+            if (this.currentIndex === startIndex && attempts > 0) {
+                break;
+            }
+        }
+        
+        console.warn('[API Key Manager] ⚠️ No available keys found after rotation');
     }
 
     /**

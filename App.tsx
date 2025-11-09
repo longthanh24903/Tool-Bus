@@ -6,6 +6,8 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   InfoCircleOutlined,
+  SettingOutlined,
+  FileTextOutlined,
 } from "@ant-design/icons";
 import { Controls } from "./components/Controls";
 import { StoryDisplay } from "./components/StoryDisplay";
@@ -13,9 +15,13 @@ import { PostGenerationSuggestions } from "./components/PostGenerationSuggestion
 import { ExportAndSeoTools } from "./components/ExportAndSeoTools";
 import { ApiKeyModal } from "./components/ApiKeyModal";
 import { HistoryModal } from "./components/HistoryModal";
+import { StoryHistoryModal } from "./components/StoryHistoryModal";
+import { AutoWriteSettings } from "./components/AutoWriteSettings";
 import * as geminiService from "./services/geminiService";
 import { apiKeyManager } from "./services/apiKeyManager";
-import type { Language, StoryPart, Suggestions } from "./types";
+import { autoSaveService } from "./services/autoSaveService";
+import { storyHistoryService } from "./services/storyHistoryService";
+import type { Language, StoryPart, Suggestions, AutoWriteConfig } from "./types";
 import { ImSpinner3 } from "react-icons/im";
 
 const App: React.FC = () => {
@@ -42,6 +48,37 @@ const App: React.FC = () => {
   const [previousTopics, setPreviousTopics] = useState<string[]>([]);
   const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState<boolean>(false);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState<boolean>(false);
+  const [isStoryHistoryModalOpen, setIsStoryHistoryModalOpen] = useState<boolean>(false);
+  const [isAutoWriteSettingsOpen, setIsAutoWriteSettingsOpen] = useState<boolean>(false);
+
+  // Auto Write Configuration
+  const [autoWriteConfig, setAutoWriteConfig] = useState<AutoWriteConfig>(() => {
+    try {
+      const stored = localStorage.getItem("autoWriteConfig");
+      if (stored) {
+        return JSON.parse(stored);
+      }
+    } catch (error) {
+      console.error("Failed to load auto write config:", error);
+    }
+    return {
+      enabled: false,
+      autoSuggestTopic: false,
+      delayBetweenParts: 2000,
+      autoLoop: false,
+      maxStories: 0, // 0 = vô hạn
+    };
+  });
+
+  // Auto Write State
+  const [isAutoWriting, setIsAutoWriting] = useState<boolean>(false);
+  const [isAutoLooping, setIsAutoLooping] = useState<boolean>(false);
+  const [autoWriteProgress, setAutoWriteProgress] = useState<{
+    current: number;
+    total: number;
+    status: string;
+    storyNumber?: number; // Số story đã tạo trong auto loop
+  }>({ current: 0, total: 0, status: "" });
 
   useEffect(() => {
     try {
@@ -55,7 +92,19 @@ const App: React.FC = () => {
 
     // Khởi tạo API key manager khi app khởi động
     apiKeyManager.initialize();
+    
+    // Khởi tạo auto save service
+    autoSaveService.initialize();
   }, []);
+
+  // Lưu auto write config khi thay đổi
+  useEffect(() => {
+    try {
+      localStorage.setItem("autoWriteConfig", JSON.stringify(autoWriteConfig));
+    } catch (error) {
+      console.error("Failed to save auto write config:", error);
+    }
+  }, [autoWriteConfig]);
 
   const addTopicToHistory = useCallback((newTopic: string) => {
     setPreviousTopics((prevTopics) => {
@@ -164,6 +213,9 @@ const App: React.FC = () => {
     setError(null);
     setIsGenerating(false);
     setAutoContinue(false);
+    setIsAutoWriting(false);
+    setIsAutoLooping(false);
+    setAutoWriteProgress({ current: 0, total: 0, status: "" });
     notification.info({
       message: "Đã thiết lập lại",
       description:
@@ -208,13 +260,16 @@ const App: React.FC = () => {
     }
   }, [topic, language, previousTopics]);
 
-  const handleGenerate = useCallback(async () => {
+  const handleGenerate = useCallback(async (topicOverride?: string) => {
     if (isComplete) {
       handleReset();
       return;
     }
 
-    if (topic.trim() === "") {
+    // Sử dụng topicOverride nếu có, nếu không thì dùng topic từ state
+    const topicToUse = topicOverride || topic;
+
+    if (!topicToUse || topicToUse.trim() === "") {
       const errorMsg = "Vui lòng nhập chủ đề để bắt đầu.";
       setError(errorMsg);
       notification.warning({
@@ -235,7 +290,7 @@ const App: React.FC = () => {
       // Step 1: Generate outline if it doesn't exist
       if (currentPart === 0) {
         const newOutline = await geminiService.generateStoryOutline(
-          topic,
+          topicToUse,
           numParts,
           language,
           enableClickbaitIntro,
@@ -251,7 +306,7 @@ const App: React.FC = () => {
         nextPartNumber,
         numParts,
         wordsPerPart,
-        topic,
+        topicToUse,
         currentOutline,
         storyParts,
         language,
@@ -264,6 +319,25 @@ const App: React.FC = () => {
       const updatedParts = [...storyParts, newPart];
       setStoryParts(updatedParts);
       setCurrentPart(nextPartNumber);
+
+      // Update auto write progress
+      if (isAutoWriting) {
+        setAutoWriteProgress((prev) => {
+          const maxStories = autoWriteConfig.maxStories || 0;
+          const statusText = prev.storyNumber
+            ? maxStories > 0
+              ? `Story #${prev.storyNumber}/${maxStories} - Đang tạo phần ${nextPartNumber}/${numParts}`
+              : `Story #${prev.storyNumber} - Đang tạo phần ${nextPartNumber}/${numParts}`
+            : `Đang tạo phần ${nextPartNumber}/${numParts}`;
+          
+          return {
+            current: nextPartNumber,
+            total: numParts,
+            status: statusText,
+            storyNumber: prev.storyNumber,
+          };
+        });
+      }
 
       // Thông báo khi tạo part thành công
       notification.success({
@@ -282,10 +356,307 @@ const App: React.FC = () => {
         const postGenSuggestions =
           await geminiService.generatePostGenerationSuggestions(
             fullText,
-            topic
+            topicToUse
           );
         setSuggestions(postGenSuggestions);
-        addTopicToHistory(topic);
+        addTopicToHistory(topicToUse);
+
+        // Lưu vào lịch sử kịch bản (thay vì tự động tải về)
+        // Trong auto loop mode, luôn lưu vào lịch sử
+        // Ngoài auto loop mode, chỉ lưu nếu auto save được bật
+        const autoSaveConfig = autoSaveService.getConfig();
+        const shouldSaveToHistory = isAutoLooping || autoSaveConfig.enabled;
+        
+        // Lấy storyNumber hiện tại từ state (QUAN TRỌNG: phải lấy đúng)
+        let currentStoryNumForSave: number | undefined = undefined;
+        if (isAutoLooping) {
+          // Ưu tiên lấy từ autoWriteProgress.storyNumber (đã được set trong quá trình generate)
+          const stateStoryNum = autoWriteProgress.storyNumber;
+          
+          if (stateStoryNum && stateStoryNum > 0) {
+            currentStoryNumForSave = stateStoryNum;
+            console.log(`[Auto Loop] Using storyNumber from state: ${currentStoryNumForSave}`);
+          } else {
+            // Nếu state không có, thử lấy từ lịch sử (các story gần đây từ auto loop)
+            const allHistory = storyHistoryService.getAll();
+            const autoLoopStories = allHistory
+              .filter(item => item.storyNumber !== undefined && item.storyNumber > 0)
+              .sort((a, b) => b.createdAt - a.createdAt); // Sắp xếp theo thời gian tạo (mới nhất trước)
+            
+            if (autoLoopStories.length > 0) {
+              // Lấy storyNumber lớn nhất từ các story gần đây
+              const maxStoryNum = Math.max(...autoLoopStories.map(s => s.storyNumber || 0));
+              currentStoryNumForSave = maxStoryNum;
+              console.log(`[Auto Loop] Found storyNumber from history: ${currentStoryNumForSave}`);
+            } else {
+              // Nếu không có story nào trong history, có thể là story đầu tiên
+              // Nhưng nếu đang trong loop, nên có storyNumber từ state
+              // Nếu không có, set = 1 (story đầu tiên)
+              currentStoryNumForSave = 1;
+              console.log(`[Auto Loop] No history found, assuming first story: ${currentStoryNumForSave}`);
+            }
+          }
+          
+          // Đảm bảo currentStoryNumForSave > 0
+          if (!currentStoryNumForSave || currentStoryNumForSave === 0) {
+            console.warn(`[Auto Loop] ⚠️ Invalid storyNumber (${currentStoryNumForSave}), setting to 1`);
+            currentStoryNumForSave = 1;
+          }
+        }
+        
+        // Lưu vào lịch sử và lấy storyNumber đã lưu để check
+        let savedStoryNumber: number | undefined = undefined;
+        if (shouldSaveToHistory) {
+          try {
+            // Đảm bảo currentStoryNumForSave được set đúng khi đang trong auto loop
+            if (isAutoLooping && (!currentStoryNumForSave || currentStoryNumForSave === 0)) {
+              console.warn(`[Auto Loop] ⚠️ currentStoryNumForSave is invalid (${currentStoryNumForSave}), attempting to fix...`);
+              // Thử lấy từ state
+              const stateStoryNum = autoWriteProgress.storyNumber;
+              if (stateStoryNum && stateStoryNum > 0) {
+                currentStoryNumForSave = stateStoryNum;
+                console.log(`[Auto Loop] ✅ Fixed currentStoryNumForSave from state: ${currentStoryNumForSave}`);
+              } else {
+                // Thử lấy từ history
+                const allHistory = storyHistoryService.getAll();
+                const autoLoopStories = allHistory.filter(item => item.storyNumber !== undefined && item.storyNumber > 0);
+                if (autoLoopStories.length > 0) {
+                  const sortedStories = autoLoopStories.sort((a, b) => (b.storyNumber || 0) - (a.storyNumber || 0));
+                  currentStoryNumForSave = (sortedStories[0].storyNumber || 0) + 1;
+                  console.log(`[Auto Loop] ✅ Fixed currentStoryNumForSave from history: ${currentStoryNumForSave}`);
+                } else {
+                  currentStoryNumForSave = 1;
+                  console.log(`[Auto Loop] ✅ Fixed currentStoryNumForSave to 1 (first story)`);
+                }
+              }
+            }
+            
+            console.log(`[Auto Loop] 💾 Saving story with storyNumber: ${currentStoryNumForSave}`);
+            // Lưu với storyNumber đã xác định
+            const savedId = storyHistoryService.save(topicToUse, updatedParts, storyOutline, currentStoryNumForSave);
+            
+            // Lấy lại storyNumber từ item vừa lưu (để đảm bảo chính xác)
+            const savedItem = storyHistoryService.getById(savedId);
+            if (savedItem) {
+              if (savedItem.storyNumber !== undefined && savedItem.storyNumber > 0) {
+                savedStoryNumber = savedItem.storyNumber;
+                console.log(`[Auto Loop] ✅ Saved story #${savedStoryNumber} to history (ID: ${savedId.substring(0, 8)}...)`);
+              } else {
+                savedStoryNumber = currentStoryNumForSave;
+                console.warn(`[Auto Loop] ⚠️ Saved item has no storyNumber, using currentStoryNumForSave: ${savedStoryNumber}`);
+              }
+            } else {
+              savedStoryNumber = currentStoryNumForSave;
+              console.error(`[Auto Loop] ❌ Cannot find saved item with ID: ${savedId}`);
+            }
+            
+            const historyCount = storyHistoryService.getCount();
+            notification.success({
+              message: isAutoLooping && savedStoryNumber
+                ? `Đã lưu Story #${savedStoryNumber} vào lịch sử`
+                : "Đã lưu kịch bản vào lịch sử",
+              description: `Tổng cộng: ${historyCount} kịch bản đã lưu. Mở "Lịch sử Kịch bản" để xem và tải về.`,
+              icon: <CheckCircleOutlined style={{ color: "#52c41a" }} />,
+              placement: "topRight",
+              duration: 4,
+            });
+          } catch (error: any) {
+            console.error("Failed to save to history:", error);
+            notification.warning({
+              message: "Không thể lưu vào lịch sử",
+              description: error.message || "Đã xảy ra lỗi khi lưu vào lịch sử.",
+              icon: <InfoCircleOutlined />,
+              placement: "topRight",
+              duration: 3,
+            });
+          }
+        }
+
+        // Nếu đang trong auto loop mode, tự động bắt đầu story mới
+        if (isAutoLooping && autoWriteConfig.autoLoop) {
+          const maxStories = autoWriteConfig.maxStories || 0; // 0 = vô hạn
+          
+          // Xác định storyNumber đã hoàn thành (QUAN TRỌNG: phải chính xác)
+          let completedStoryNum: number = 0;
+          
+          // Ưu tiên 1: Lấy từ savedStoryNumber (vừa lưu vào history - đáng tin cậy nhất)
+          if (savedStoryNumber !== undefined && savedStoryNumber > 0) {
+            completedStoryNum = savedStoryNumber;
+            console.log(`[Auto Loop Check] ✅ Using savedStoryNumber: ${completedStoryNum}`);
+          } 
+          // Ưu tiên 2: Lấy từ currentStoryNumForSave (đã xác định trước khi lưu)
+          else if (currentStoryNumForSave !== undefined && currentStoryNumForSave > 0) {
+            completedStoryNum = currentStoryNumForSave;
+            console.log(`[Auto Loop Check] ✅ Using currentStoryNumForSave: ${completedStoryNum}`);
+          }
+          // Ưu tiên 3: Lấy từ autoWriteProgress.storyNumber (state hiện tại)
+          else if (autoWriteProgress.storyNumber && autoWriteProgress.storyNumber > 0) {
+            completedStoryNum = autoWriteProgress.storyNumber;
+            console.log(`[Auto Loop Check] ✅ Using autoWriteProgress.storyNumber: ${completedStoryNum}`);
+          }
+          // Fallback: Lấy từ lịch sử (story có storyNumber lớn nhất)
+          else {
+            const allHistory = storyHistoryService.getAll();
+            const autoLoopStories = allHistory.filter(item => item.storyNumber !== undefined && item.storyNumber > 0);
+            if (autoLoopStories.length > 0) {
+              const sortedStories = autoLoopStories.sort((a, b) => (b.storyNumber || 0) - (a.storyNumber || 0));
+              completedStoryNum = sortedStories[0].storyNumber || 0;
+              console.log(`[Auto Loop Check] ✅ Using storyNumber from history: ${completedStoryNum}`);
+            }
+          }
+          
+          // Đảm bảo completedStoryNum > 0
+          if (completedStoryNum <= 0) {
+            console.error(`[Auto Loop Check] ❌ ERROR: Invalid completedStoryNum (${completedStoryNum}), cannot continue`);
+            // Nếu không thể xác định storyNumber, dừng để tránh lỗi
+            setIsAutoLooping(false);
+            setIsAutoWriting(false);
+            setAutoWriteProgress({ current: 0, total: 0, status: "", storyNumber: undefined });
+            setAutoContinue(false);
+            setIsGenerating(false);
+            notification.error({
+              message: "Lỗi Auto Loop",
+              description: "Không thể xác định số kịch bản đã tạo. Đã dừng auto loop.",
+              icon: <CloseCircleOutlined />,
+              placement: "topRight",
+              duration: 5,
+            });
+            return;
+          }
+          
+          console.log(`[Auto Loop Check] 📊 Story #${completedStoryNum} completed, maxStories: ${maxStories}`);
+          console.log(`[Auto Loop Check] 📊 Debug: savedStoryNumber=${savedStoryNumber}, currentStoryNumForSave=${currentStoryNumForSave}, completedStoryNum=${completedStoryNum}`);
+          
+          // KIỂM TRA 1: Nếu maxStories > 0 và số story vừa hoàn thành >= maxStories, dừng NGAY
+          if (maxStories > 0 && completedStoryNum >= maxStories) {
+            console.log(`[Auto Loop] ⛔⛔⛔ STOPPING: ${completedStoryNum} >= ${maxStories} (REACHED MAX STORIES - CHECK 1)`);
+            // Đã đạt số kịch bản tối đa, dừng auto loop
+            setIsAutoLooping(false);
+            setIsAutoWriting(false);
+            setAutoWriteProgress({ current: 0, total: 0, status: "", storyNumber: undefined });
+            setAutoContinue(false);
+            setIsGenerating(false);
+            notification.success({
+              message: "🎉 Hoàn thành Auto Loop!",
+              description: `Đã tạo xong ${maxStories} kịch bản như đã cấu hình.`,
+              icon: <CheckCircleOutlined style={{ color: "#52c41a" }} />,
+              placement: "topRight",
+              duration: 5,
+            });
+            return; // DỪNG NGAY, KHÔNG TIẾP TỤC
+          }
+          
+          // Tính storyNumber tiếp theo: story vừa hoàn thành + 1
+          const nextStoryNumber = completedStoryNum + 1;
+          
+          console.log(`[Auto Loop] 📊 Next story would be #${nextStoryNumber}, maxStories: ${maxStories}`);
+          
+          // KIỂM TRA 2: Nếu story tiếp theo vượt quá maxStories, dừng NGAY (trước khi bắt đầu story mới)
+          if (maxStories > 0 && nextStoryNumber > maxStories) {
+            console.log(`[Auto Loop] ⛔⛔⛔ STOPPING: ${nextStoryNumber} > ${maxStories} (NEXT STORY EXCEEDS LIMIT - CHECK 2)`);
+            setIsAutoLooping(false);
+            setIsAutoWriting(false);
+            setAutoWriteProgress({ current: 0, total: 0, status: "", storyNumber: undefined });
+            setAutoContinue(false);
+            setIsGenerating(false);
+            notification.success({
+              message: "🎉 Hoàn thành Auto Loop!",
+              description: `Đã tạo xong ${maxStories} kịch bản như đã cấu hình.`,
+              icon: <CheckCircleOutlined style={{ color: "#52c41a" }} />,
+              placement: "topRight",
+              duration: 5,
+            });
+            return; // DỪNG NGAY, KHÔNG TIẾP TỤC
+          }
+          
+          // Đợi một chút trước khi bắt đầu story mới (chỉ khi chưa dừng)
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          
+          // Reset state để bắt đầu story mới
+          setStoryParts([]);
+          setStoryOutline("");
+          setCurrentPart(0);
+          setSuggestions(null);
+          setError(null);
+          
+          // Tính số story còn lại
+          const remainingStories = maxStories > 0 ? maxStories - nextStoryNumber : -1;
+          const statusText = maxStories > 0 
+            ? `Story #${nextStoryNumber}/${maxStories} - Đang gợi ý topic...`
+            : `Story #${nextStoryNumber} - Đang gợi ý topic...`;
+          
+          setAutoWriteProgress({
+            current: 0,
+            total: numParts,
+            status: statusText,
+            storyNumber: nextStoryNumber,
+          });
+          
+          const notificationDesc = maxStories > 0
+            ? `Đang gợi ý chủ đề mới... (Còn ${remainingStories} kịch bản)`
+            : "Đang gợi ý chủ đề mới...";
+          
+          notification.info({
+            message: `Đang bắt đầu Story #${nextStoryNumber}${maxStories > 0 ? `/${maxStories}` : ''}`,
+            description: notificationDesc,
+            icon: <InfoCircleOutlined style={{ color: "#7951d4" }} />,
+            placement: "topRight",
+            duration: 2,
+          });
+          
+          // Gợi ý topic mới và bắt đầu story mới
+          try {
+            const newTopic = await geminiService.analyzeAndSuggestTopic(
+              "",
+              language,
+              previousTopics
+            );
+            setTopic(newTopic);
+            
+            // Update progress với topic mới (đảm bảo storyNumber được set đúng)
+            setAutoWriteProgress({
+              current: 0,
+              total: numParts,
+              status: maxStories > 0
+                ? `Story #${nextStoryNumber}/${maxStories} - Đang tạo outline...`
+                : `Story #${nextStoryNumber} - Đang tạo outline...`,
+              storyNumber: nextStoryNumber,
+            });
+            
+            // Bắt đầu generate story mới
+            setAutoContinue(true);
+            // Gọi handleGenerate với topic mới
+            // Await để đảm bảo nó bắt đầu trước khi return
+            // Nhưng không cần đợi nó hoàn thành vì sẽ được xử lý bởi auto continue effect
+            setIsGenerating(true); // Set lại isGenerating = true để tiếp tục
+            handleGenerate(newTopic);
+            
+            // Return ngay để không reset auto write state và không hiển thị thông báo hoàn thành
+            // handleGenerate sẽ được xử lý async
+            return;
+          } catch (error: any) {
+            console.error("Failed to suggest new topic:", error);
+            // Nếu không thể gợi ý topic, dừng auto loop
+            setIsAutoLooping(false);
+            setIsAutoWriting(false);
+            setAutoWriteProgress({ current: 0, total: 0, status: "" });
+            setAutoContinue(false);
+            setIsGenerating(false);
+            notification.error({
+              message: "Không thể gợi ý topic mới",
+              description: "Đã dừng auto loop.",
+              icon: <CloseCircleOutlined />,
+              placement: "topRight",
+              duration: 4,
+            });
+            return;
+          }
+        }
+
+        // Reset auto write state (chỉ khi không trong auto loop)
+        setIsAutoWriting(false);
+        setAutoWriteProgress({ current: 0, total: 0, status: "" });
+        setAutoContinue(false);
 
         // Thông báo khi hoàn thành tất cả parts
         notification.success({
@@ -299,6 +670,13 @@ const App: React.FC = () => {
     } catch (err: any) {
       const errorMsg = err.message || "An error occurred during generation.";
       setError(errorMsg);
+      // Nếu đang trong auto loop, dừng loop khi có lỗi
+      if (isAutoLooping) {
+        setIsAutoLooping(false);
+      }
+      setIsAutoWriting(false);
+      setAutoWriteProgress({ current: 0, total: 0, status: "" });
+      setAutoContinue(false);
       notification.error({
         message: "Lỗi khi tạo truyện",
         description: errorMsg,
@@ -307,7 +685,12 @@ const App: React.FC = () => {
         duration: 5,
       });
     } finally {
+      // Chỉ set isGenerating = false nếu không đang trong auto loop mode
+      // Hoặc nếu đang trong auto loop nhưng không đang chuyển sang story mới
+      if (!isAutoLooping || !autoWriteConfig.autoLoop) {
       setIsGenerating(false);
+      }
+      // Nếu đang trong auto loop, isGenerating sẽ được set lại = true khi bắt đầu story mới
     }
   }, [
     topic,
@@ -324,17 +707,272 @@ const App: React.FC = () => {
     isComplete,
     handleReset,
     addTopicToHistory,
+    isAutoWriting,
+    isAutoLooping,
+    autoWriteConfig,
   ]);
 
-  useEffect(() => {
-    // Don't run if the story is complete, a generation is already in progress, or auto-continue is off
-    if (isComplete || isGenerating || !autoContinue) {
+  // Stop Auto Loop
+  const handleStopAutoLoop = useCallback(() => {
+    setIsAutoLooping(false);
+    setIsAutoWriting(false);
+    setAutoWriteProgress({ current: 0, total: 0, status: "" });
+    setAutoContinue(false);
+    notification.info({
+      message: "Đã dừng Auto Loop",
+      description: "Auto loop đã được dừng. Bạn có thể tiếp tục thủ công.",
+      icon: <InfoCircleOutlined style={{ color: "#7951d4" }} />,
+      placement: "topRight",
+      duration: 3,
+    });
+  }, []);
+
+  // Auto Write Mode: Tự động gợi ý topic và viết tất cả parts
+  const handleAutoWrite = useCallback(async (isLoopMode: boolean = false) => {
+    if (isAutoWriting || isGenerating) {
       return;
     }
 
+    // Nếu là loop mode, set isAutoLooping
+    if (isLoopMode || autoWriteConfig.autoLoop) {
+      setIsAutoLooping(true);
+    }
+
+    setIsAutoWriting(true);
+    // Nếu là loop mode, set storyNumber
+    // - Nếu đây là lần đầu (chưa có storyNumber), set = 1
+    // - Nếu đã có storyNumber (đang trong loop), giữ nguyên
+    let storyNumber: number | undefined = undefined;
+    if (isLoopMode || autoWriteConfig.autoLoop) {
+      const maxStories = autoWriteConfig.maxStories || 0;
+      
+      // Xác định storyNumber: ưu tiên từ state, sau đó từ history, cuối cùng là 1
+      if (autoWriteProgress.storyNumber && autoWriteProgress.storyNumber > 0) {
+        storyNumber = autoWriteProgress.storyNumber;
+      } else {
+        // Thử lấy từ history (story có storyNumber lớn nhất)
+        const allHistory = storyHistoryService.getAll();
+        const autoLoopStories = allHistory.filter(item => item.storyNumber !== undefined && item.storyNumber > 0);
+        if (autoLoopStories.length > 0) {
+          const sortedStories = autoLoopStories.sort((a, b) => (b.storyNumber || 0) - (a.storyNumber || 0));
+          const lastStoryNum = sortedStories[0].storyNumber || 0;
+          storyNumber = lastStoryNum + 1; // Story tiếp theo
+          console.log(`[Auto Write] Found last story #${lastStoryNum} in history, starting story #${storyNumber}`);
+        } else {
+          // Lần đầu tiên, bắt đầu từ 1
+          storyNumber = 1;
+          console.log(`[Auto Write] First story, starting from #1`);
+        }
+      }
+      
+      // ✅ KIỂM TRA QUAN TRỌNG: Nếu storyNumber vượt quá maxStories, dừng NGAY
+      if (maxStories > 0 && storyNumber > maxStories) {
+        console.log(`[Auto Write] ⛔⛔⛔ STOPPING: storyNumber ${storyNumber} > maxStories ${maxStories} (BEFORE STARTING NEW STORY)`);
+        setIsAutoLooping(false);
+        setIsAutoWriting(false);
+        setAutoWriteProgress({ current: 0, total: 0, status: "", storyNumber: undefined });
+        setAutoContinue(false);
+        setIsGenerating(false);
+        notification.success({
+          message: "🎉 Hoàn thành Auto Loop!",
+          description: `Đã tạo xong ${maxStories} kịch bản như đã cấu hình.`,
+          icon: <CheckCircleOutlined style={{ color: "#52c41a" }} />,
+          placement: "topRight",
+          duration: 5,
+        });
+        return; // DỪNG NGAY, KHÔNG BẮT ĐẦU STORY MỚI
+      }
+      
+      // ✅ KIỂM TRA 2: Nếu storyNumber = maxStories, đây là story cuối cùng
+      if (maxStories > 0 && storyNumber === maxStories) {
+        console.log(`[Auto Write] 📌 This is the last story: #${storyNumber}/${maxStories}`);
+      }
+    }
+    
+    setAutoWriteProgress({
+      current: 0,
+      total: numParts,
+      status: storyNumber
+        ? `Story #${storyNumber}${autoWriteConfig.maxStories && autoWriteConfig.maxStories > 0 ? `/${autoWriteConfig.maxStories}` : ''} - Đang khởi tạo...`
+        : "Đang khởi tạo...",
+      storyNumber: storyNumber,
+    });
+    setError(null);
+
+    try {
+      // Step 1: Auto suggest topic 
+      // - Luôn tự động gợi ý nếu auto suggest topic được bật
+      // - Luôn tự động gợi ý nếu auto loop mode được bật (vì cần topic mới cho mỗi story)
+      let currentTopic = topic.trim();
+      const shouldAutoSuggest = 
+        autoWriteConfig.autoSuggestTopic || 
+        isLoopMode || 
+        autoWriteConfig.autoLoop ||
+        (autoWriteConfig.enabled && !currentTopic); // Nếu auto write enabled và topic trống, tự động gợi ý
+      
+      if (shouldAutoSuggest && !currentTopic) {
+        const maxStoriesForSuggest = autoWriteConfig.maxStories || 0;
+        const suggestStatusText = isLoopMode && storyNumber
+          ? maxStoriesForSuggest > 0
+            ? `Story #${storyNumber}/${maxStoriesForSuggest} - Đang gợi ý topic...`
+            : `Story #${storyNumber} - Đang gợi ý topic...`
+          : "Đang gợi ý topic...";
+        
+        setAutoWriteProgress({
+          current: 0,
+          total: numParts,
+          status: suggestStatusText,
+          storyNumber: isLoopMode ? storyNumber : undefined,
+        });
+        setIsSuggestingTopic(true);
+        try {
+          const suggestedTopic = await geminiService.analyzeAndSuggestTopic(
+            "",
+            language,
+            previousTopics
+          );
+          currentTopic = suggestedTopic.trim();
+          setTopic(currentTopic);
+          const maxStoriesForNotification = autoWriteConfig.maxStories || 0;
+          const notificationMessage = isLoopMode && storyNumber
+            ? maxStoriesForNotification > 0
+              ? `Story #${storyNumber}/${maxStoriesForNotification} - Đã gợi ý topic`
+              : `Story #${storyNumber} - Đã gợi ý topic`
+            : "Đã gợi ý topic";
+          
+          notification.info({
+            message: notificationMessage,
+            description: `Topic: "${currentTopic}"`,
+            icon: <InfoCircleOutlined style={{ color: "#7951d4" }} />,
+            placement: "topRight",
+            duration: 2,
+          });
+        } catch (error: any) {
+          console.error("Failed to suggest topic:", error);
+          // Trong loop mode, nếu không thể gợi ý topic, dừng loop
+          if (isLoopMode || autoWriteConfig.autoLoop) {
+            setIsAutoLooping(false);
+            setIsAutoWriting(false);
+            setAutoWriteProgress({ current: 0, total: 0, status: "" });
+            setIsSuggestingTopic(false);
+            notification.error({
+              message: "Không thể gợi ý topic",
+              description: "Đã dừng auto loop.",
+              icon: <CloseCircleOutlined />,
+              placement: "topRight",
+              duration: 4,
+            });
+            return;
+          } else {
+            notification.warning({
+              message: "Không thể gợi ý topic",
+              description: "Vui lòng nhập topic thủ công.",
+              icon: <InfoCircleOutlined />,
+              placement: "topRight",
+              duration: 4,
+            });
+            setIsAutoWriting(false);
+            setAutoWriteProgress({ current: 0, total: 0, status: "" });
+            setIsSuggestingTopic(false);
+            return;
+          }
+        } finally {
+          setIsSuggestingTopic(false);
+        }
+      }
+
+      if (!currentTopic) {
+        setIsAutoWriting(false);
+        setIsAutoLooping(false);
+        setAutoWriteProgress({ current: 0, total: 0, status: "" });
+        notification.warning({
+          message: "Topic không thể trống",
+          description: "Vui lòng nhập topic hoặc bật auto suggest topic.",
+          icon: <InfoCircleOutlined />,
+          placement: "topRight",
+          duration: 4,
+        });
+        return;
+      }
+
+      // Step 2: Reset và bắt đầu generate từ đầu
+      setStoryParts([]);
+      setStoryOutline("");
+      setCurrentPart(0);
+      setSuggestions(null);
+      setError(null);
+
+      // Step 3: Enable auto continue để tự động viết tất cả parts
+      setAutoContinue(true);
+
+      // Step 4: Bắt đầu generate part đầu tiên với topic đã được đảm bảo
+      const maxStoriesForProgress = autoWriteConfig.maxStories || 0;
+      const progressStatusText = isLoopMode && storyNumber
+        ? maxStoriesForProgress > 0
+          ? `Story #${storyNumber}/${maxStoriesForProgress} - Đang tạo outline và part 1...`
+          : `Story #${storyNumber} - Đang tạo outline và part 1...`
+        : "Đang tạo outline và part 1...";
+      
+      setAutoWriteProgress({
+        current: 0,
+        total: numParts,
+        status: progressStatusText,
+        storyNumber: storyNumber,
+      });
+      await handleGenerate(currentTopic);
+      
+    } catch (error: any) {
+      const errorMsg = error.message || "An error occurred during auto write.";
+      setError(errorMsg);
+      setIsAutoWriting(false);
+      setIsAutoLooping(false);
+      setAutoWriteProgress({ current: 0, total: 0, status: "" });
+      setAutoContinue(false);
+      notification.error({
+        message: "Lỗi khi tự động viết",
+        description: errorMsg,
+        icon: <CloseCircleOutlined />,
+        placement: "topRight",
+        duration: 5,
+      });
+    }
+  }, [
+    topic,
+    numParts,
+    language,
+    previousTopics,
+    autoWriteConfig,
+    isAutoWriting,
+    isGenerating,
+    handleGenerate,
+    autoWriteProgress.storyNumber,
+  ]);
+
+  // Auto Continue Effect: Tự động viết tiếp khi auto continue được bật
+  useEffect(() => {
+    // Don't run if the story is complete, a generation is already in progress, or auto-continue is off
+    if (isComplete || isGenerating || !autoContinue) {
+      if (isComplete && autoContinue) {
+        // Tắt auto continue khi hoàn thành
+        setAutoContinue(false);
+      }
+      return;
+    }
+
+    // Delay giữa các parts nếu đang auto writing
+    const delay = isAutoWriting && autoWriteConfig.enabled 
+      ? autoWriteConfig.delayBetweenParts 
+      : 1000; // Default delay 1s for manual auto continue
+
     // If auto-continue is on and the story has started, generate the next part
-    if (currentPart > 0 && currentPart < numParts) {
+    // Điều kiện: đã có ít nhất 1 part, chưa đủ số part, và số parts hiện tại bằng currentPart (đảm bảo part vừa được tạo xong)
+    if (currentPart > 0 && currentPart < numParts && storyParts.length === currentPart) {
+      const timer = setTimeout(() => {
+        // Sử dụng topic từ state (đã được update trong handleAutoWrite)
       handleGenerate();
+      }, delay);
+
+      return () => clearTimeout(timer);
     }
   }, [
     storyParts,
@@ -344,7 +982,11 @@ const App: React.FC = () => {
     currentPart,
     numParts,
     handleGenerate,
+    isAutoWriting,
+    autoWriteConfig.enabled,
+    autoWriteConfig.delayBetweenParts,
   ]);
+
 
   return (
     <div
@@ -365,13 +1007,31 @@ const App: React.FC = () => {
             position: "relative",
           }}
         >
-          <Button
-            icon={<KeyOutlined />}
-            onClick={() => setIsApiKeyModalOpen(true)}
+          <div
             style={{
               position: "absolute",
               top: 0,
               right: 0,
+              display: "flex",
+              gap: 8,
+            }}
+          >
+            <Button
+              icon={<SettingOutlined />}
+              onClick={() => setIsAutoWriteSettingsOpen(true)}
+              style={{
+                backgroundColor: "#FFFFFF",
+                borderColor: "#E5E5E5",
+                color: "#7951d4",
+                boxShadow: "0 2px 8px rgba(0, 0, 0, 0.08)",
+              }}
+            >
+              <span className="hidden sm:inline">Auto Write</span>
+            </Button>
+            <Button
+              icon={<KeyOutlined />}
+              onClick={() => setIsApiKeyModalOpen(true)}
+              style={{
               backgroundColor: "#FFFFFF",
               borderColor: "#E5E5E5",
               color: "#7951d4",
@@ -380,6 +1040,19 @@ const App: React.FC = () => {
           >
             <span className="hidden sm:inline">API Keys</span>
           </Button>
+            <Button
+              icon={<FileTextOutlined />}
+              onClick={() => setIsStoryHistoryModalOpen(true)}
+              style={{
+                backgroundColor: "#FFFFFF",
+                borderColor: "#E5E5E5",
+                color: "#7951d4",
+                boxShadow: "0 2px 8px rgba(0, 0, 0, 0.08)",
+              }}
+            >
+              <span className="hidden sm:inline">Kịch bản ({storyHistoryService.getCount()})</span>
+            </Button>
+          </div>
           <h1
             style={{
               fontSize: "3rem",
@@ -443,7 +1116,17 @@ const App: React.FC = () => {
               isLoading={isLoading}
               isGenerating={isGenerating}
               isComplete={isComplete}
-              onGenerate={handleGenerate}
+              onGenerate={() => {
+                // Nếu auto write mode enabled, sử dụng handleAutoWrite
+                if (autoWriteConfig.enabled && currentPart === 0) {
+                  // Nếu auto loop được bật, bắt đầu loop mode
+                  handleAutoWrite(autoWriteConfig.autoLoop);
+                } else {
+                  handleGenerate();
+                }
+              }}
+              isAutoLooping={isAutoLooping}
+              onStopAutoLoop={handleStopAutoLoop}
               onReset={handleReset}
               currentPart={currentPart}
               totalParts={numParts}
@@ -452,6 +1135,9 @@ const App: React.FC = () => {
               previousTopics={previousTopics}
               onClearHistory={clearTopicHistory}
               onOpenHistoryModal={() => setIsHistoryModalOpen(true)}
+              autoWriteConfig={autoWriteConfig}
+              isAutoWriting={isAutoWriting}
+              autoWriteProgress={autoWriteProgress}
             />
           </aside>
 
@@ -502,6 +1188,70 @@ const App: React.FC = () => {
               />
             )}
 
+            {/* Auto Write Progress */}
+            {isAutoWriting && autoWriteProgress.total > 0 && (
+              <Alert
+                message={
+                  isAutoLooping
+                    ? `🔄 Auto Loop Mode - Story #${autoWriteProgress.storyNumber || 1}${
+                        autoWriteConfig.maxStories && autoWriteConfig.maxStories > 0
+                          ? `/${autoWriteConfig.maxStories}`
+                          : ''
+                      }`
+                    : "🤖 Auto Write Mode"
+                }
+                description={
+                  <div>
+                    <div style={{ marginBottom: 8 }}>
+                      {autoWriteProgress.status || "Đang xử lý..."}
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div
+                        style={{
+                          flex: 1,
+                          height: 8,
+                          backgroundColor: "#f0f0f0",
+                          borderRadius: 4,
+                          overflow: "hidden",
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: `${
+                              (autoWriteProgress.current / autoWriteProgress.total) * 100
+                            }%`,
+                            height: "100%",
+                            backgroundColor: isAutoLooping ? "#FFA940" : "#7951d4",
+                            transition: "width 0.3s ease",
+                          }}
+                        />
+                      </div>
+                      <span style={{ fontSize: 12, color: "#8c8c8c" }}>
+                        {autoWriteProgress.current}/{autoWriteProgress.total}
+                      </span>
+                    </div>
+                    {isAutoLooping && (
+                      <div style={{ marginTop: 8, fontSize: 12, color: "#8c8c8c" }}>
+                        {autoWriteConfig.maxStories && autoWriteConfig.maxStories > 0 ? (
+                          <>
+                            Đã tạo: {autoWriteProgress.storyNumber || 0}/{autoWriteConfig.maxStories} kịch bản.
+                            {" "}Nhấn "Dừng Auto Loop" để dừng bất cứ lúc nào.
+                          </>
+                        ) : (
+                          <>
+                            ⚠️ Đang tự động tạo nhiều stories (vô hạn). Nhấn "Dừng Auto Loop" để dừng.
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                }
+                type={isAutoLooping ? "warning" : "info"}
+                showIcon
+                style={{ marginBottom: 24 }}
+              />
+            )}
+
             {(storyParts.length > 0 || isLoading) && (
               <Spin
                 indicator={
@@ -513,7 +1263,11 @@ const App: React.FC = () => {
                   ) as React.ReactNode
                 }
                 spinning={isLoading}
-                tip="Đang tạo nội dung..."
+                tip={
+                  isAutoWriting && autoWriteProgress.status
+                    ? autoWriteProgress.status
+                    : "Đang tạo nội dung..."
+                }
                 style={{
                   backgroundColor: "#FFFFFF",
                   padding: "24px 32px",
@@ -574,6 +1328,18 @@ const App: React.FC = () => {
         onClearHistory={clearTopicHistory}
         onDeleteTopic={deleteTopic}
         isLoading={isLoading}
+      />
+
+      <AutoWriteSettings
+        isOpen={isAutoWriteSettingsOpen}
+        onClose={() => setIsAutoWriteSettingsOpen(false)}
+        autoWriteConfig={autoWriteConfig}
+        onAutoWriteConfigChange={setAutoWriteConfig}
+      />
+
+      <StoryHistoryModal
+        isOpen={isStoryHistoryModalOpen}
+        onClose={() => setIsStoryHistoryModalOpen(false)}
       />
     </div>
   );
